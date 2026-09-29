@@ -123,7 +123,7 @@ namespace BookmarkViewer.Patches
                         return;
                     }
                     string? json = await result.beatmapLevelData.GetBeatmapStringAsync(____beatmapKey);
-                    if (string.IsNullOrEmpty(json)) return;
+                    if (json == null || json.Length == 0) return;
                     if (!__instance || !__instance.isActiveAndEnabled || requestVersion != _requestVersion || Config.Instance?.Enabled != true) return;
                     ReadBookmarks(____beatmapLevel, json);
                     if (Bookmarks.Count == 0) return;
