@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.ComponentModel;
 using System.Threading.Tasks;
 using BeatSaberMarkupLanguage.Attributes;
@@ -37,7 +37,7 @@ namespace BookmarkViewer.UI
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SnapToBookmark)));
             }
 
-        }           
+        }
         [UIValue("skew")]
         public bool UnskewBookmarks
         {
@@ -47,8 +47,8 @@ namespace BookmarkViewer.UI
                 Settings.UnskewBookmarks = value;
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(UnskewBookmarks)));
             }
-        }        
-        
+        }
+
         [UIValue("width")]
         public float BookmarkWidthSize
         {
