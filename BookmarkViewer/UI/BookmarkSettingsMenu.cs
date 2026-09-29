@@ -12,42 +12,57 @@ namespace BookmarkViewer.UI
 {
 	public class BookmarkSettingsMenu : MonoBehaviour, IInitializable, INotifyPropertyChanged
 	{
-		public event PropertyChangedEventHandler PropertyChanged = null!;
+		public event PropertyChangedEventHandler? PropertyChanged;
+		private Config Settings => Config.Instance ?? throw new InvalidOperationException("BookmarkViewer settings are not initialized.");
 
 
         [UIValue("enabled")]
         public bool Enabled
         {
-            get => Config.Instance.Enabled;
+            get => Settings.Enabled;
             set
             {
-                Config.Instance.Enabled = value;
+                Settings.Enabled = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Enabled)));
             }
         }
 
         [UIValue("snap")]
         public bool SnapToBookmark
         {
-            get => Config.Instance.SnapToBookmark;
+            get => Settings.SnapToBookmark;
             set
             {
-                Config.Instance.SnapToBookmark = value;
+                Settings.SnapToBookmark = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SnapToBookmark)));
+            }
+
+        }           
+        [UIValue("skew")]
+        public bool UnskewBookmarks
+        {
+            get => Settings.UnskewBookmarks;
+            set
+            {
+                Settings.UnskewBookmarks = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(UnskewBookmarks)));
             }
         }        
         
         [UIValue("width")]
         public float BookmarkWidthSize
         {
-            get => Config.Instance.BookmarkWidthSize;
+            get => Settings.BookmarkWidthSize;
             set
             {
-                Config.Instance.BookmarkWidthSize = value;
+                Settings.BookmarkWidthSize = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(BookmarkWidthSize)));
             }
         }
 
         public void Initialize()
 		{
-            BSMLSettings.instance.AddSettingsMenu("BookmarkViewer", "BookmarkViewer.UI.Menu.bsml", this);
+            BSMLSettings.Instance.AddSettingsMenu("BookmarkViewer", "BookmarkViewer.UI.Menu.bsml", this);
 		}
 	}
 }
