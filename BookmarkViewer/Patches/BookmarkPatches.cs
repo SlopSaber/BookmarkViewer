@@ -7,6 +7,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -125,7 +126,10 @@ namespace BookmarkViewer.Patches
                     string? json = await result.beatmapLevelData.GetBeatmapStringAsync(____beatmapKey);
                     if (json == null || json.Length == 0) return;
                     if (!__instance || !__instance.isActiveAndEnabled || requestVersion != _requestVersion || Config.Instance?.Enabled != true) return;
-                    ReadBookmarks(____beatmapLevel, json);
+                    float beatsPerMinute = ____beatmapLevel.beatsPerMinute;
+                    List<Bookmark> loadedBookmarks = await Task.Run(() => ReadBookmarks(beatsPerMinute, json));
+                    if (!__instance || !__instance.isActiveAndEnabled || requestVersion != _requestVersion || Config.Instance?.Enabled != true) return;
+                    Bookmarks.AddRange(loadedBookmarks);
                     if (Bookmarks.Count == 0) return;
 
                     TimeSlider slider = __instance.GetField<TimeSlider, PracticeViewController>("_songStartSlider");
@@ -152,13 +156,14 @@ namespace BookmarkViewer.Patches
                 }
             }
 
-            private static void ReadBookmarks(BeatmapLevel level, string json)
+            private static List<Bookmark> ReadBookmarks(float beatsPerMinute, string json)
             {
-                if (level.beatsPerMinute <= 0f) return;
+                var bookmarks = new List<Bookmark>();
+                if (beatsPerMinute <= 0f) return bookmarks;
                 JObject root = JObject.Parse(json);
                 JToken? customData = root["customData"] ?? root["_customData"];
                 JArray? bookmarkList = (customData?["bookmarks"] ?? customData?["_bookmarks"]) as JArray;
-                if (bookmarkList == null) return;
+                if (bookmarkList == null) return bookmarks;
                 foreach (JObject item in bookmarkList.OfType<JObject>())
                 {
                     float? beat = (item["b"] ?? item["_time"])?.Value<float>();
@@ -167,21 +172,21 @@ namespace BookmarkViewer.Patches
                     Color color = colorArray != null && colorArray.Count >= 3
                         ? new Color(colorArray[0].Value<float>(), colorArray[1].Value<float>(), colorArray[2].Value<float>())
                         : Color.red;
-                    Bookmarks.Add(new Bookmark
+                    bookmarks.Add(new Bookmark
                     {
                         Name = (item["n"] ?? item["_name"])?.Value<string>() ?? string.Empty,
                         TimeInSeconds = beat.Value,
                         Color = color
                     });
                 }
-                Bookmarks.Sort((left, right) => left.TimeInSeconds.CompareTo(right.TimeInSeconds));
+                bookmarks.Sort((left, right) => left.TimeInSeconds.CompareTo(right.TimeInSeconds));
                 bool useBpmEvents = (customData?["bookmarksUseOfficialBpmEvents"] ??
                     customData?["_bookmarksUseOfficialBpmEvents"])?.Value<bool>() == true;
                 if (!useBpmEvents)
                 {
-                    foreach (Bookmark bookmark in Bookmarks)
-                        bookmark.TimeInSeconds = bookmark.TimeInSeconds * 60f / level.beatsPerMinute;
-                    return;
+                    foreach (Bookmark bookmark in bookmarks)
+                        bookmark.TimeInSeconds = bookmark.TimeInSeconds * 60f / beatsPerMinute;
+                    return bookmarks;
                 }
 
                 List<(float Beat, float Bpm)> events = ((root["bpmEvents"] ?? root["_BPMChanges"]) as JArray)?
@@ -193,9 +198,9 @@ namespace BookmarkViewer.Patches
                     .ToList() ?? new List<(float Beat, float Bpm)>();
                 float segmentBeat = 0f;
                 float segmentSeconds = 0f;
-                float bpm = level.beatsPerMinute;
+                float bpm = beatsPerMinute;
                 int eventIndex = 0;
-                foreach (Bookmark bookmark in Bookmarks)
+                foreach (Bookmark bookmark in bookmarks)
                 {
                     while (eventIndex < events.Count && events[eventIndex].Beat <= bookmark.TimeInSeconds)
                     {
@@ -206,6 +211,7 @@ namespace BookmarkViewer.Patches
                     }
                     bookmark.TimeInSeconds = segmentSeconds + (bookmark.TimeInSeconds - segmentBeat) * 60f / bpm;
                 }
+                return bookmarks;
             }
 
             private static void ShowBookmarks(Transform sliderGraphicTransform, BeatmapLevel level)
