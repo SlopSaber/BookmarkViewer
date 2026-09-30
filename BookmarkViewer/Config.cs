@@ -10,7 +10,7 @@ namespace BookmarkViewer
 
         public virtual bool Enabled { get; set; } = true;
         public virtual bool SnapToBookmark { get; set; } = true;
-        public virtual bool UnskewBookmarks { get; set; } = true;
+        public virtual bool UnskewBookmarks { get; set; } = false;
         public virtual float BookmarkWidthSize { get; set; } = 0.8f;
     }
 }

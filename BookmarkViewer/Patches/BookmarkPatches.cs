@@ -29,6 +29,8 @@ namespace BookmarkViewer.Patches
         private static CurvedTextMeshPro? _currentBookmarkText;
         private static Bookmark? _currentBookmark;
         private static Vector3 _bookmarkGraphicScale = Vector3.one;
+        private static Vector2 _bookmarkGraphicSize;
+        private static float _bookmarkGraphicHeight;
         private static float _minX;
         private static float _maxX;
         private static int _requestVersion;
@@ -58,13 +60,14 @@ namespace BookmarkViewer.Patches
             if (_currentBookmark?.Graphic != null)
             {
                 _currentBookmark.Graphic.color = WithAlpha(_currentBookmark.Color, 0.7f);
-                _currentBookmark.Graphic.transform.localScale = _bookmarkGraphicScale;
+                _currentBookmark.Graphic.rectTransform.sizeDelta = _bookmarkGraphicSize;
             }
             _currentBookmark = selected;
             if (selected?.Graphic != null)
             {
                 selected.Graphic.color = WithAlpha(selected.Color, 0.9f);
-                selected.Graphic.transform.localScale = Vector3.Scale(_bookmarkGraphicScale, new Vector3(1f, 1.15f, 1f));
+                selected.Graphic.rectTransform.sizeDelta = new Vector2(
+                    _bookmarkGraphicSize.x, _bookmarkGraphicSize.y + _bookmarkGraphicHeight * 0.15f);
             }
             if (_currentBookmarkText != null)
                 _currentBookmarkText.text = selected?.Name ?? string.Empty;
@@ -144,7 +147,9 @@ namespace BookmarkViewer.Patches
                         _templateGraphic = UnityEngine.Object.Instantiate(sliderGraphic, sliderGraphic.transform.parent);
                         _templateGraphic.gameObject.SetActive(false);
                     }
-                    _templateGraphic.transform.rotation = Quaternion.Euler(0f, 0f, Config.Instance.UnskewBookmarks ? 5f : 0f);
+                    _templateGraphic.transform.rotation = Config.Instance.UnskewBookmarks
+                        ? Quaternion.Euler(0f, 0f, 5f)
+                        : sliderGraphic.transform.rotation;
                     SetupNameText(slider);
                     GetSliderRange(slider, sliderGraphic);
                     ShowBookmarks(sliderGraphic.transform, ____beatmapLevel);
@@ -232,7 +237,9 @@ namespace BookmarkViewer.Patches
                         GraphicsPool.Add(graphic);
                     }
                     bookmark.Graphic = graphic;
+                    graphic.transform.rotation = _templateGraphic!.transform.rotation;
                     graphic.transform.localScale = _bookmarkGraphicScale;
+                    graphic.rectTransform.sizeDelta = _bookmarkGraphicSize;
                     graphic.transform.position = new Vector3(
                         Mathf.Lerp(_minX, _maxX, Mathf.InverseLerp(0f, level.songDuration, bookmark.TimeInSeconds)),
                         sliderGraphicTransform.position.y, sliderGraphicTransform.position.z);
@@ -265,8 +272,10 @@ namespace BookmarkViewer.Patches
                     slider.value = slider.minValue;
                     _minX = sliderGraphic.transform.position.x;
                     slider.value = value;
-                    _bookmarkGraphicScale = Vector3.Scale(sliderGraphic.transform.localScale,
-                        new Vector3(Config.Instance.BookmarkWidthSize, 1f, 1f));
+                    _bookmarkGraphicScale = sliderGraphic.transform.localScale;
+                    _bookmarkGraphicSize = sliderGraphic.rectTransform.sizeDelta;
+                    _bookmarkGraphicSize.x -= sliderGraphic.rectTransform.rect.width * (1f - Config.Instance.BookmarkWidthSize);
+                    _bookmarkGraphicHeight = sliderGraphic.rectTransform.rect.height;
                 }
                 finally
                 {
