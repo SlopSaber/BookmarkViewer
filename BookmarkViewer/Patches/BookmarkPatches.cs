@@ -2,9 +2,11 @@ using BGLib.Polyglot;
 using HarmonyLib;
 using HMUI;
 using IPA.Utilities;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -35,6 +37,70 @@ namespace BookmarkViewer.Patches
         private static float _maxX;
         private static int _requestVersion;
         private static bool _updatingSliderRange;
+        private static readonly DefaultJsonNameTable BeatmapPropertyNames = CreateBeatmapPropertyNames();
+
+        private static DefaultJsonNameTable CreateBeatmapPropertyNames()
+        {
+            var names = new DefaultJsonNameTable();
+            foreach (string name in new[]
+            {
+                "version", "_version", "customData", "_customData", "bookmarks", "_bookmarks",
+                "bookmarksUseOfficialBpmEvents", "_bookmarksUseOfficialBpmEvents", "bpmEvents", "_BPMChanges",
+                "b", "x", "y", "c", "d", "a", "m", "n", "_time", "_lineIndex", "_lineLayer",
+                "_type", "_cutDirection", "_BPM", "_name", "_color", "colorNotes", "bombNotes",
+                "obstacles", "basicBeatmapEvents", "_notes", "_events", "_obstacles"
+            }) names.Add(name);
+            return names;
+        }
+
+        private static JObject ReadBookmarkMetadata(string json)
+        {
+            using (var text = new StringReader(json))
+            using (var reader = new JsonTextReader(text) { PropertyNameTable = BeatmapPropertyNames })
+            {
+                if (!ReadJsonContent(reader) || reader.TokenType != JsonToken.StartObject)
+                    throw new JsonReaderException("Expected a beatmap JSON object.");
+                JObject metadata = ReadMetadataObject(reader, false);
+                if (ReadJsonContent(reader))
+                    throw new JsonReaderException("Additional JSON content after the beatmap object.");
+                return metadata;
+            }
+        }
+
+        private static bool ReadJsonContent(JsonTextReader reader)
+        {
+            while (reader.Read())
+                if (reader.TokenType != JsonToken.Comment) return true;
+            return false;
+        }
+
+        private static JObject ReadMetadataObject(JsonTextReader reader, bool customData)
+        {
+            var metadata = new JObject();
+            while (ReadJsonContent(reader))
+            {
+                if (reader.TokenType == JsonToken.EndObject) return metadata;
+                if (reader.TokenType != JsonToken.PropertyName)
+                    throw new JsonReaderException("Expected a beatmap property.");
+                string name = (string)reader.Value!;
+                if (!ReadJsonContent(reader)) throw new JsonReaderException("Unexpected end of beatmap JSON.");
+                bool keep = customData
+                    ? name == "bookmarks" || name == "_bookmarks" || name == "bookmarksUseOfficialBpmEvents"
+                        || name == "_bookmarksUseOfficialBpmEvents"
+                    : name == "customData" || name == "_customData" || name == "bpmEvents" || name == "_BPMChanges";
+                if (!keep)
+                {
+                    // Validate skipped data without retaining its object tree.
+                    reader.Skip();
+                    continue;
+                }
+                metadata[name] = !customData && (name == "customData" || name == "_customData")
+                    && reader.TokenType == JsonToken.StartObject
+                    ? ReadMetadataObject(reader, true)
+                    : JToken.ReadFrom(reader);
+            }
+            throw new JsonReaderException("Unexpected end of beatmap JSON.");
+        }
 
         private static float FindClosestTime(float target)
         {
@@ -165,7 +231,7 @@ namespace BookmarkViewer.Patches
             {
                 var bookmarks = new List<Bookmark>();
                 if (beatsPerMinute <= 0f) return bookmarks;
-                JObject root = JObject.Parse(json);
+                JObject root = ReadBookmarkMetadata(json);
                 JToken? customData = root["customData"] ?? root["_customData"];
                 JArray? bookmarkList = (customData?["bookmarks"] ?? customData?["_bookmarks"]) as JArray;
                 if (bookmarkList == null) return bookmarks;
