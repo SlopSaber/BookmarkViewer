@@ -94,7 +94,7 @@ namespace BookmarkViewer.Patches
                 !ReferenceEquals(level, view.GetField<BeatmapLevel, PracticeViewController>("_beatmapLevel"))) return false;
             var currentKey = view.GetField<BeatmapKey, PracticeViewController>("_beatmapKey");
             return currentKey.levelId == key.levelId && currentKey.difficulty == key.difficulty &&
-                ReferenceEquals(currentKey.beatmapCharacteristic, key.beatmapCharacteristic);
+                ReferenceEquals(currentKey.characteristic, key.characteristic);
         }
 
         private static DefaultJsonNameTable CreateBeatmapPropertyNames()
