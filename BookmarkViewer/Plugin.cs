@@ -22,6 +22,7 @@ namespace BookmarkViewer
     public class Plugin
     {
         internal static Assembly Assembly { get; } = Assembly.GetExecutingAssembly();
+        private Harmony? _harmony;
 
 
 
@@ -40,9 +41,16 @@ namespace BookmarkViewer
         [OnStart]
         public void OnStart()
         {
-            var harmony = new Harmony("Pink.BookmarkViewer");
-            harmony.PatchAll(Assembly);
+            _harmony = new Harmony("Pink.BookmarkViewer");
+            _harmony.PatchAll(Assembly);
          
+        }
+
+        [OnExit]
+        public void OnExit()
+        {
+            Patches.BookmarkPatches.Stop();
+            _harmony?.UnpatchSelf();
         }
     }
 }

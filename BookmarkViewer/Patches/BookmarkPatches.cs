@@ -22,11 +22,27 @@ namespace BookmarkViewer.Patches
             public string Name = string.Empty;
             public float TimeInSeconds;
             public Color Color;
+            public Color NormalColor;
+            public Color SelectedColor;
             public Graphic? Graphic;
         }
 
+        private sealed class BookmarkData
+        {
+            public static readonly BookmarkData Empty = new BookmarkData(Array.Empty<Bookmark>(), false);
+            public readonly Bookmark[] Items;
+            public readonly bool CanSearch;
+
+            public BookmarkData(Bookmark[] items, bool canSearch)
+            {
+                Items = items;
+                CanSearch = canSearch;
+            }
+        }
+
         private static readonly List<Graphic> GraphicsPool = new List<Graphic>();
-        private static readonly List<Bookmark> Bookmarks = new List<Bookmark>();
+        private static BookmarkData _data = BookmarkData.Empty;
+        private static IReadOnlyList<Bookmark> Bookmarks => _data.Items;
         private static Graphic? _templateGraphic;
         private static CurvedTextMeshPro? _currentBookmarkText;
         private static Bookmark? _currentBookmark;
@@ -35,9 +51,51 @@ namespace BookmarkViewer.Patches
         private static float _bookmarkGraphicHeight;
         private static float _minX;
         private static float _maxX;
-        private static int _requestVersion;
+        private static CancellationTokenSource? _requestSource;
+        private static PracticeViewController? _requestOwner;
+        private static bool _stopping;
         private static bool _updatingSliderRange;
-        private static readonly DefaultJsonNameTable BeatmapPropertyNames = CreateBeatmapPropertyNames();
+
+        private static class MetadataNames
+        {
+            internal static readonly DefaultJsonNameTable Table = CreateBeatmapPropertyNames();
+        }
+
+        private static void Clear(PracticeViewController? owner = null)
+        {
+            if (owner != null && !ReferenceEquals(owner, _requestOwner)) return;
+            var source = _requestSource;
+            _requestSource = null;
+            _requestOwner = null;
+            _data = BookmarkData.Empty;
+            _currentBookmark = null;
+            if (_currentBookmarkText != null) _currentBookmarkText.text = string.Empty;
+            GraphicsPool.RemoveAll(graphic => graphic == null);
+            foreach (Graphic graphic in GraphicsPool) graphic.gameObject.SetActive(false);
+            try { source?.Cancel(); }
+            catch (Exception exception) { Debug.LogWarning($"BookmarkViewer could not cancel bookmark loading: {exception}"); }
+        }
+
+        internal static void Stop()
+        {
+            _stopping = true;
+            Clear();
+            GraphicsPool.Clear();
+            _templateGraphic = null;
+            _currentBookmarkText = null;
+        }
+
+        private static bool IsCurrent(PracticeViewController view, BeatmapLevel level, BeatmapKey key,
+            CancellationTokenSource source, CancellationToken token)
+        {
+            if (_stopping || token.IsCancellationRequested || !ReferenceEquals(source, _requestSource) ||
+                !ReferenceEquals(view, _requestOwner) || !view || !view.isActiveAndEnabled ||
+                !view.isInViewControllerHierarchy || Config.Instance?.Enabled != true ||
+                !ReferenceEquals(level, view.GetField<BeatmapLevel, PracticeViewController>("_beatmapLevel"))) return false;
+            var currentKey = view.GetField<BeatmapKey, PracticeViewController>("_beatmapKey");
+            return currentKey.levelId == key.levelId && currentKey.difficulty == key.difficulty &&
+                ReferenceEquals(currentKey.beatmapCharacteristic, key.beatmapCharacteristic);
+        }
 
         private static DefaultJsonNameTable CreateBeatmapPropertyNames()
         {
@@ -53,37 +111,41 @@ namespace BookmarkViewer.Patches
             return names;
         }
 
-        private static JObject ReadBookmarkMetadata(string json)
+        private static JObject ReadBookmarkMetadata(string json, CancellationToken token)
         {
             using (var text = new StringReader(json))
-            using (var reader = new JsonTextReader(text) { PropertyNameTable = BeatmapPropertyNames })
+            using (var reader = new JsonTextReader(text) { PropertyNameTable = MetadataNames.Table })
             {
-                if (!ReadJsonContent(reader) || reader.TokenType != JsonToken.StartObject)
+                if (!ReadJsonContent(reader, token) || reader.TokenType != JsonToken.StartObject)
                     throw new JsonReaderException("Expected a beatmap JSON object.");
-                JObject metadata = ReadMetadataObject(reader, false);
-                if (ReadJsonContent(reader))
+                JObject metadata = ReadMetadataObject(reader, false, token);
+                if (ReadJsonContent(reader, token))
                     throw new JsonReaderException("Additional JSON content after the beatmap object.");
                 return metadata;
             }
         }
 
-        private static bool ReadJsonContent(JsonTextReader reader)
+        private static bool ReadJsonContent(JsonTextReader reader, CancellationToken token)
         {
+            token.ThrowIfCancellationRequested();
             while (reader.Read())
+            {
+                token.ThrowIfCancellationRequested();
                 if (reader.TokenType != JsonToken.Comment) return true;
+            }
             return false;
         }
 
-        private static JObject ReadMetadataObject(JsonTextReader reader, bool customData)
+        private static JObject ReadMetadataObject(JsonTextReader reader, bool customData, CancellationToken token)
         {
             var metadata = new JObject();
-            while (ReadJsonContent(reader))
+            while (ReadJsonContent(reader, token))
             {
                 if (reader.TokenType == JsonToken.EndObject) return metadata;
                 if (reader.TokenType != JsonToken.PropertyName)
                     throw new JsonReaderException("Expected a beatmap property.");
                 string name = (string)reader.Value!;
-                if (!ReadJsonContent(reader)) throw new JsonReaderException("Unexpected end of beatmap JSON.");
+                if (!ReadJsonContent(reader, token)) throw new JsonReaderException("Unexpected end of beatmap JSON.");
                 bool keep = customData
                     ? name == "bookmarks" || name == "_bookmarks" || name == "bookmarksUseOfficialBpmEvents"
                         || name == "_bookmarksUseOfficialBpmEvents"
@@ -96,7 +158,7 @@ namespace BookmarkViewer.Patches
                 }
                 metadata[name] = !customData && (name == "customData" || name == "_customData")
                     && reader.TokenType == JsonToken.StartObject
-                    ? ReadMetadataObject(reader, true)
+                    ? ReadMetadataObject(reader, true, token)
                     : JToken.ReadFrom(reader);
             }
             throw new JsonReaderException("Unexpected end of beatmap JSON.");
@@ -104,6 +166,24 @@ namespace BookmarkViewer.Patches
 
         private static float FindClosestTime(float target)
         {
+            if (_data.CanSearch && !float.IsNaN(target) && !float.IsInfinity(target))
+            {
+                int right = FindBoundary(target, false);
+                int nearest = right == 0 ? 0 : right == Bookmarks.Count ? right - 1 :
+                    Math.Abs(target - Bookmarks[right].TimeInSeconds) < Math.Abs(target - Bookmarks[right - 1].TimeInSeconds)
+                        ? right : right - 1;
+                float distance = Math.Abs(target - Bookmarks[nearest].TimeInSeconds);
+                int first = 0;
+                int end = nearest;
+                // Rounded distances can tie across several distinct times; preserve the first match.
+                while (first < end)
+                {
+                    int middle = first + (end - first) / 2;
+                    if (Math.Abs(target - Bookmarks[middle].TimeInSeconds) <= distance) end = middle;
+                    else first = middle + 1;
+                }
+                return Bookmarks[first].TimeInSeconds;
+            }
             float closest = Bookmarks[0].TimeInSeconds;
             float minDifference = Math.Abs(target - closest);
             for (int i = 1; i < Bookmarks.Count; i++)
@@ -119,19 +199,43 @@ namespace BookmarkViewer.Patches
             return closest;
         }
 
+        private static int FindBoundary(float target, bool afterEqual)
+        {
+            int first = 0;
+            int end = Bookmarks.Count;
+            while (first < end)
+            {
+                int middle = first + (end - first) / 2;
+                float time = Bookmarks[middle].TimeInSeconds;
+                if (time < target || (afterEqual && time == target)) first = middle + 1;
+                else end = middle;
+            }
+            return first;
+        }
+
         private static void SelectBookmark(float value)
         {
-            Bookmark? selected = Bookmarks.FindLast(bookmark => bookmark.TimeInSeconds <= value);
+            Bookmark? selected = null;
+            if (_data.CanSearch && !float.IsNaN(value))
+            {
+                int index = FindBoundary(value, true) - 1;
+                if (index >= 0) selected = Bookmarks[index];
+            }
+            else
+            {
+                for (int index = Bookmarks.Count - 1; index >= 0; --index)
+                    if (Bookmarks[index].TimeInSeconds <= value) { selected = Bookmarks[index]; break; }
+            }
             if (ReferenceEquals(selected, _currentBookmark)) return;
             if (_currentBookmark?.Graphic != null)
             {
-                _currentBookmark.Graphic.color = WithAlpha(_currentBookmark.Color, 0.7f);
+                _currentBookmark.Graphic.color = _currentBookmark.NormalColor;
                 _currentBookmark.Graphic.rectTransform.sizeDelta = _bookmarkGraphicSize;
             }
             _currentBookmark = selected;
             if (selected?.Graphic != null)
             {
-                selected.Graphic.color = WithAlpha(selected.Color, 0.9f);
+                selected.Graphic.color = selected.SelectedColor;
                 selected.Graphic.rectTransform.sizeDelta = new Vector2(
                     _bookmarkGraphicSize.x, _bookmarkGraphicSize.y + _bookmarkGraphicHeight * 0.15f);
             }
@@ -143,6 +247,18 @@ namespace BookmarkViewer.Patches
         {
             color.a = alpha;
             return color;
+        }
+
+        [HarmonyPatch(typeof(PracticeViewController), "Init")]
+        private static class InitializePatch
+        {
+            private static void Prefix(PracticeViewController __instance) => Clear(__instance);
+        }
+
+        [HarmonyPatch(typeof(PracticeViewController), "DidDeactivate")]
+        private static class DeactivatePatch
+        {
+            private static void Prefix(PracticeViewController __instance) => Clear(__instance);
         }
 
         [HarmonyPatch(typeof(PracticeViewController), "HandleSongStartSliderValueDidChange")]
@@ -170,35 +286,40 @@ namespace BookmarkViewer.Patches
             private static async void Postfix(PracticeViewController __instance, BeatmapLevel ____beatmapLevel, BeatmapKey ____beatmapKey,
                 BeatmapLevelsModel ____beatmapLevelsModel, BeatmapLevelsEntitlementModel ____beatmapLevelsEntitlementModel)
             {
-                int requestVersion = ++_requestVersion;
-                GraphicsPool.RemoveAll(graphic => graphic == null);
-                foreach (Graphic graphic in GraphicsPool)
-                    graphic.gameObject.SetActive(false);
-                Bookmarks.Clear();
-                _currentBookmark = null;
-                if (_currentBookmarkText != null) _currentBookmarkText.text = string.Empty;
-                if (Config.Instance?.Enabled != true || ____beatmapLevel == null ||
+                Clear();
+                if (_stopping || Config.Instance?.Enabled != true || ____beatmapLevel == null ||
                     string.IsNullOrEmpty(____beatmapKey.levelId) ||
                     !____beatmapKey.levelId.StartsWith("custom_level_", StringComparison.Ordinal)) return;
+
+                var source = new CancellationTokenSource();
+                var token = source.Token;
+                _requestSource = source;
+                _requestOwner = __instance;
+                float beatsPerMinute = ____beatmapLevel.beatsPerMinute;
 
                 try
                 {
                     BeatmapLevelDataVersion version = await ____beatmapLevelsEntitlementModel.GetLevelDataVersionAsync(
-                        ____beatmapKey.levelId, CancellationToken.None);
+                        ____beatmapKey.levelId, token);
+                    await UnityGame.SwitchToMainThreadAsync();
+                    if (!IsCurrent(__instance, ____beatmapLevel, ____beatmapKey, source, token)) return;
                     LoadBeatmapLevelDataResult result = await ____beatmapLevelsModel.LoadBeatmapLevelDataAsync(
-                        ____beatmapKey.levelId, version, CancellationToken.None);
+                        ____beatmapKey.levelId, version, token);
+                    await UnityGame.SwitchToMainThreadAsync();
+                    if (!IsCurrent(__instance, ____beatmapLevel, ____beatmapKey, source, token)) return;
                     if (result.isError || result.beatmapLevelData == null)
                     {
                         Debug.LogWarning($"BookmarkViewer could not load level data: {result.errorMessage}");
                         return;
                     }
                     string? json = await result.beatmapLevelData.GetBeatmapStringAsync(____beatmapKey);
+                    await UnityGame.SwitchToMainThreadAsync();
+                    if (!IsCurrent(__instance, ____beatmapLevel, ____beatmapKey, source, token)) return;
                     if (json == null || json.Length == 0) return;
-                    if (!__instance || !__instance.isActiveAndEnabled || requestVersion != _requestVersion || Config.Instance?.Enabled != true) return;
-                    float beatsPerMinute = ____beatmapLevel.beatsPerMinute;
-                    List<Bookmark> loadedBookmarks = await Task.Run(() => ReadBookmarks(beatsPerMinute, json));
-                    if (!__instance || !__instance.isActiveAndEnabled || requestVersion != _requestVersion || Config.Instance?.Enabled != true) return;
-                    Bookmarks.AddRange(loadedBookmarks);
+                    var loadedBookmarks = await Task.Run(() => PrepareBookmarks(beatsPerMinute, json, token), token);
+                    await UnityGame.SwitchToMainThreadAsync();
+                    if (!IsCurrent(__instance, ____beatmapLevel, ____beatmapKey, source, token)) return;
+                    _data = loadedBookmarks;
                     if (Bookmarks.Count == 0) return;
 
                     TimeSlider slider = __instance.GetField<TimeSlider, PracticeViewController>("_songStartSlider");
@@ -221,22 +342,49 @@ namespace BookmarkViewer.Patches
                     ShowBookmarks(sliderGraphic.transform, ____beatmapLevel);
                     SelectBookmark(slider.value - ____beatmapLevel.songDuration / 100f);
                 }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { }
                 catch (Exception exception)
                 {
+                    await UnityGame.SwitchToMainThreadAsync();
                     Debug.LogWarning($"BookmarkViewer could not load bookmarks: {exception}");
+                }
+                finally
+                {
+                    await UnityGame.SwitchToMainThreadAsync();
+                    if (ReferenceEquals(_requestSource, source)) _requestSource = null;
+                    source.Dispose();
                 }
             }
 
-            private static List<Bookmark> ReadBookmarks(float beatsPerMinute, string json)
+            private static BookmarkData PrepareBookmarks(float beatsPerMinute, string json, CancellationToken token)
             {
+                List<Bookmark> items = ReadBookmarks(beatsPerMinute, json, token);
+                bool canSearch = true;
+                float previous = float.NegativeInfinity;
+                foreach (Bookmark bookmark in items)
+                {
+                    token.ThrowIfCancellationRequested();
+                    float time = bookmark.TimeInSeconds;
+                    canSearch &= !float.IsNaN(time) && !float.IsInfinity(time) && time >= previous;
+                    previous = time;
+                    bookmark.NormalColor = WithAlpha(bookmark.Color, 0.7f);
+                    bookmark.SelectedColor = WithAlpha(bookmark.Color, 0.9f);
+                }
+                return new BookmarkData(items.ToArray(), canSearch);
+            }
+
+            private static List<Bookmark> ReadBookmarks(float beatsPerMinute, string json, CancellationToken token)
+            {
+                token.ThrowIfCancellationRequested();
                 var bookmarks = new List<Bookmark>();
                 if (beatsPerMinute <= 0f) return bookmarks;
-                JObject root = ReadBookmarkMetadata(json);
+                JObject root = ReadBookmarkMetadata(json, token);
                 JToken? customData = root["customData"] ?? root["_customData"];
                 JArray? bookmarkList = (customData?["bookmarks"] ?? customData?["_bookmarks"]) as JArray;
                 if (bookmarkList == null) return bookmarks;
                 foreach (JObject item in bookmarkList.OfType<JObject>())
                 {
+                    token.ThrowIfCancellationRequested();
                     float? beat = (item["b"] ?? item["_time"])?.Value<float>();
                     if (!beat.HasValue) continue;
                     JArray? colorArray = (item["c"] ?? item["_color"]) as JArray;
@@ -256,7 +404,10 @@ namespace BookmarkViewer.Patches
                 if (!useBpmEvents)
                 {
                     foreach (Bookmark bookmark in bookmarks)
+                    {
+                        token.ThrowIfCancellationRequested();
                         bookmark.TimeInSeconds = bookmark.TimeInSeconds * 60f / beatsPerMinute;
+                    }
                     return bookmarks;
                 }
 
@@ -273,6 +424,7 @@ namespace BookmarkViewer.Patches
                 int eventIndex = 0;
                 foreach (Bookmark bookmark in bookmarks)
                 {
+                    token.ThrowIfCancellationRequested();
                     while (eventIndex < events.Count && events[eventIndex].Beat <= bookmark.TimeInSeconds)
                     {
                         (float eventBeat, float eventBpm) = events[eventIndex++];
@@ -309,7 +461,7 @@ namespace BookmarkViewer.Patches
                     graphic.transform.position = new Vector3(
                         Mathf.Lerp(_minX, _maxX, Mathf.InverseLerp(0f, level.songDuration, bookmark.TimeInSeconds)),
                         sliderGraphicTransform.position.y, sliderGraphicTransform.position.z);
-                    graphic.color = WithAlpha(bookmark.Color, 0.7f);
+                    graphic.color = bookmark.NormalColor;
                 }
             }
 
